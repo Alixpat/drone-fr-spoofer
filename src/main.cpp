@@ -69,7 +69,7 @@ struct Drone {
 
 static Drone drones[] = {
     {
-        .id            = "000FAKE01_TEST_DRONE_0001A",
+        .id            = "DJI4FDE8A1B3C5MAV3P20240001AFR",
         .ssid          = "DRONE_TEST_01",
         .mac           = {0xAA, 0xBB, 0xCC, 0x01, 0x01, 0x01},
         .color         = {0, 0, 255},       // Bleu
@@ -85,7 +85,7 @@ static Drone drones[] = {
         .angle         = 0.0,
     },
     {
-        .id            = "000FAKE02_TEST_DRONE_0002B",
+        .id            = "PAR8GH92B5E7D1ANF2U20240002BFR",
         .ssid          = "DRONE_TEST_02",
         .mac           = {0xAA, 0xBB, 0xCC, 0x02, 0x02, 0x02},
         .color         = {255, 0, 0},       // Rouge

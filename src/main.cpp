@@ -10,6 +10,7 @@
  *     contenant un payload Vendor Specific (OUI 0x6A5C35) au format TLV
  *   - Chaque drone simulé a sa propre trajectoire circulaire
  *   - La LED RGB du Stamp S3 flashe dans la couleur du drone émis
+ *   - Les drones émettent en alternance (un par seconde)
  *
  * Basé sur la librairie droneID_FR de Pierre Kancir (GPL v3)
  * https://github.com/khancyr/droneID_FR
@@ -41,7 +42,7 @@ extern "C" {
 
 struct Drone {
     // Identité
-    const char* id;             // ID AlphaTango, 30 chars max
+    const char* id;             // ID AlphaTango, 30 chars exactement
     const char* ssid;           // SSID visible dans la beacon
     uint8_t     mac[6];         // Adresse MAC fictive
     uint8_t     color[3];       // Couleur LED {R, G, B}
@@ -64,19 +65,23 @@ struct Drone {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-//  Drones à simuler — modifier ici
+//  Drones à simuler
+//  ID_FR : 30 chars exactement (trigramme constructeur + numéro série)
+//  Zone : carrefour de l'Anémomètre, parc de l'île Saint-Germain,
+//         Issy-les-Moulineaux (48.8002, 2.2487)
 // ─────────────────────────────────────────────────────────────────────
 
 static Drone drones[] = {
     {
+        //                 123456789012345678901234567890
         .id            = "DJI4FDE8A1B3C5MAV3P20240001AFR",
         .ssid          = "DRONE_TEST_01",
         .mac           = {0xAA, 0xBB, 0xCC, 0x01, 0x01, 0x01},
         .color         = {0, 0, 255},       // Bleu
-        .home_lat      = 48.825000,         // Issy-les-Moulineaux
-        .home_lon      = 2.260000,
-        .center_lat    = 48.826000,
-        .center_lon    = 2.261000,
+        .home_lat      = 48.799800,
+        .home_lon      = 2.248000,
+        .center_lat    = 48.800200,
+        .center_lon    = 2.248700,
         .radius_deg    = 0.001,             // ~111m
         .altitude      = 120.0,
         .height        = 50.0,
@@ -85,14 +90,15 @@ static Drone drones[] = {
         .angle         = 0.0,
     },
     {
+        //                 123456789012345678901234567890
         .id            = "PAR8GH92B5E7D1ANF2U20240002BFR",
         .ssid          = "DRONE_TEST_02",
         .mac           = {0xAA, 0xBB, 0xCC, 0x02, 0x02, 0x02},
         .color         = {255, 0, 0},       // Rouge
-        .home_lat      = 48.830000,
-        .home_lon      = 2.265000,
-        .center_lat    = 48.831000,
-        .center_lon    = 2.266000,
+        .home_lat      = 48.800500,
+        .home_lon      = 2.249200,
+        .center_lat    = 48.800800,
+        .center_lon    = 2.248400,
         .radius_deg    = 0.0015,            // ~167m
         .altitude      = 80.0,
         .height        = 30.0,
@@ -108,16 +114,9 @@ static const size_t NUM_DRONES = sizeof(drones) / sizeof(drones[0]);
 //  Trame beacon 802.11
 // ─────────────────────────────────────────────────────────────────────
 
-// Structure d'une beacon 802.11 :
-//   [Frame Control][Duration][Dest MAC][Src MAC][BSSID][Seq]
-//   [Timestamp][Beacon Interval][Capability]
-//   [Tag SSID][Tag Supported Rates][Tag DS Channel]
-//   [Tag Vendor Specific → payload droneID_FR]
-
 static const uint16_t MAX_BEACON = 40 + 32 + droneIDFR::FRAME_PAYLOAD_LEN_MAX;
 static uint8_t beacon[40 + 32 + 251];
 
-// En-tête fixe de la beacon (jusqu'au tag SSID exclu)
 static const uint8_t BEACON_HEADER[] = {
     0x80, 0x00,                                     // Frame Control: beacon
     0x00, 0x00,                                     // Duration
@@ -130,7 +129,7 @@ static const uint8_t BEACON_HEADER[] = {
     0x21, 0x04,                                     // Capability info
 };
 
-static droneIDFR idfr;  // Instance de la librairie
+static droneIDFR idfr;
 
 // ─────────────────────────────────────────────────────────────────────
 //  LED RGB
@@ -146,21 +145,18 @@ void led_flash(const uint8_t color[3]) {
 //  Trajectoire
 // ─────────────────────────────────────────────────────────────────────
 
-// Fait avancer le drone sur son cercle
 void update_position(Drone &d, double dt) {
     d.angle += d.angular_speed * dt;
     if (d.angle >= 360.0) d.angle -= 360.0;
     if (d.angle < 0.0)    d.angle += 360.0;
 }
 
-// Calcule lat/lon à partir du centre + angle + rayon
 void get_position(const Drone &d, double &lat, double &lon) {
     double rad = d.angle * DEG_TO_RAD;
     lat = d.center_lat + d.radius_deg * cos(rad);
     lon = d.center_lon + d.radius_deg * sin(rad);
 }
 
-// Cap tangent au cercle (perpendiculaire au rayon)
 uint16_t get_heading(const Drone &d) {
     double h = d.angle + (d.angular_speed >= 0 ? 90.0 : -90.0);
     while (h < 0)    h += 360.0;
@@ -176,32 +172,25 @@ void send_beacon(Drone &d) {
     double lat, lon;
     get_position(d, lat, lon);
 
-    // 1) Copier l'en-tête fixe
     memcpy(beacon, BEACON_HEADER, sizeof(BEACON_HEADER));
+    memcpy(&beacon[10], d.mac, 6);
+    memcpy(&beacon[16], d.mac, 6);
 
-    // 2) Injecter la MAC source et BSSID
-    memcpy(&beacon[10], d.mac, 6);  // Source
-    memcpy(&beacon[16], d.mac, 6);  // BSSID
-
-    // 3) Tag SSID (id 0x00, longueur, données)
     uint16_t pos = sizeof(BEACON_HEADER);
     uint8_t ssid_len = strlen(d.ssid);
-    beacon[pos++] = 0x00;           // Tag ID: SSID
-    beacon[pos++] = ssid_len;       // Longueur
+    beacon[pos++] = 0x00;
+    beacon[pos++] = ssid_len;
     memcpy(&beacon[pos], d.ssid, ssid_len);
     pos += ssid_len;
 
-    // 4) Tag Supported Rates (obligatoire pour une beacon valide)
-    beacon[pos++] = 0x01;           // Tag ID: Supported Rates
-    beacon[pos++] = 0x01;           // Longueur: 1
-    beacon[pos++] = 0x0C;           // 6 Mbps
+    beacon[pos++] = 0x01;
+    beacon[pos++] = 0x01;
+    beacon[pos++] = 0x0C;
 
-    // 5) Tag DS Parameter Set (canal Wi-Fi)
-    beacon[pos++] = 0x03;           // Tag ID: DS Parameter
-    beacon[pos++] = 0x01;           // Longueur: 1
+    beacon[pos++] = 0x03;
+    beacon[pos++] = 0x01;
     beacon[pos++] = WIFI_CHANNEL;
 
-    // 6) Remplir les données drone dans la librairie
     idfr.set_drone_id(d.id);
     idfr.set_lat_lon(lat, lon);
     idfr.set_altitude((int16_t)d.altitude);
@@ -210,10 +199,7 @@ void send_beacon(Drone &d) {
     idfr.set_ground_speed((uint8_t)d.speed);
     idfr.set_heading(get_heading(d));
 
-    // 7) Générer le tag Vendor Specific (OUI 6A:5C:35 + TLV)
     uint16_t end = idfr.generate_beacon_frame(beacon, pos);
-
-    // 8) Envoyer la trame brute sur l'interface Wi-Fi
     esp_wifi_80211_tx(WIFI_IF_AP, beacon, end, true);
 }
 
@@ -229,7 +215,6 @@ void setup() {
     Serial.printf("Drones: %d | Canal: %d | Intervalle: %dms\n\n",
                   NUM_DRONES, WIFI_CHANNEL, BEACON_INTERVAL);
 
-    // Test LED : flash chaque couleur de drone au démarrage
     rgbLedWrite(RGB_LED_PIN, 0, 0, 0);
     for (size_t i = 0; i < NUM_DRONES; i++) {
         rgbLedWrite(RGB_LED_PIN, drones[i].color[0], drones[i].color[1], drones[i].color[2]);
@@ -237,20 +222,16 @@ void setup() {
     }
     rgbLedWrite(RGB_LED_PIN, 0, 0, 0);
 
-    // Démarrer le Wi-Fi en mode AP sur le canal réglementaire
     WiFi.softAP(drones[0].ssid, nullptr, WIFI_CHANNEL);
     delay(500);
 
-    // Beacon interval à 1s (au lieu de 100ms par défaut)
     wifi_config_t cfg;
     esp_wifi_get_config(WIFI_IF_AP, &cfg);
     cfg.ap.beacon_interval = 1000;
     esp_wifi_set_config(WIFI_IF_AP, &cfg);
 
-    // Bande passante 20 MHz
     esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
 
-    // Tenter de fixer le débit à 6 Mbps (peut échouer sur ESP-IDF 5.x)
     esp_err_t err = esp_wifi_internal_set_fix_rate(WIFI_IF_AP, true, WIFI_PHY_RATE_6M);
     if (err != ESP_OK) {
         Serial.printf("[WARN] fix_rate: %s (debit auto)\n", esp_err_to_name(err));
@@ -260,31 +241,34 @@ void setup() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-//  Loop
+//  Loop — émission alternée : un drone par seconde
 // ─────────────────────────────────────────────────────────────────────
 
 static uint32_t last_tx = 0;
 static uint32_t tx_count = 0;
+static size_t   current_drone = 0;
 
 void loop() {
     uint32_t now = millis();
     if (now - last_tx < BEACON_INTERVAL) return;
     last_tx = now;
 
-    double dt = BEACON_INTERVAL / 1000.0;
+    // Compenser le round-robin : chaque drone n'émet que toutes
+    // les NUM_DRONES secondes, donc sa trajectoire avance d'autant
+    double dt = BEACON_INTERVAL / 1000.0 * NUM_DRONES;
+    update_position(drones[current_drone], dt);
+
+    send_beacon(drones[current_drone]);
+    led_flash(drones[current_drone].color);
+
     tx_count++;
-    Serial.printf("[#%lu]\n", tx_count);
+    double lat, lon;
+    get_position(drones[current_drone], lat, lon);
+    Serial.printf("[#%lu] %s  %.6f, %.6f  alt=%dm hdg=%03d\n",
+                  tx_count,
+                  drones[current_drone].ssid, lat, lon,
+                  (int)drones[current_drone].altitude,
+                  get_heading(drones[current_drone]));
 
-    for (size_t i = 0; i < NUM_DRONES; i++) {
-        update_position(drones[i], dt);
-        send_beacon(drones[i]);
-        led_flash(drones[i].color);
-
-        double lat, lon;
-        get_position(drones[i], lat, lon);
-        Serial.printf("  %s  %.6f, %.6f  alt=%dm hdg=%03d\n",
-                      drones[i].ssid, lat, lon,
-                      (int)drones[i].altitude, get_heading(drones[i]));
-    }
-    Serial.println();
+    current_drone = (current_drone + 1) % NUM_DRONES;
 }

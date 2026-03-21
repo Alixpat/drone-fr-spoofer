@@ -19,7 +19,7 @@ pio device monitor
 
 Modifier le tableau `drones[]` dans `src/main.cpp` :
 
-- `id` : identifiant AlphaTango (30 chars max)
+- `id` : identifiant AlphaTango (30 chars exactement)
 - `ssid` : nom du réseau Wi-Fi beacon
 - `color` : couleur LED RGB `{R, G, B}` (0-255)
 - `home_lat/lon` : coordonnées de décollage

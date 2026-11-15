@@ -5,9 +5,13 @@
  * (arrêté du 27 décembre 2019) sur un M5Stack Stamp S3 (ESP32-S3).
  *
  * Principe :
- *   - L'ESP32 crée un point d'accès Wi-Fi sur le canal 6
+ *   - L'ESP32 se cale sur le canal 6, sans créer de point d'accès
  *   - Toutes les secondes, il envoie une trame beacon 802.11 brute
  *     contenant un payload Vendor Specific (OUI 0x6A5C35) au format TLV
+ *   - Les beacons partent en 802.11b DSSS à 1 Mbit/s, préambule long,
+ *     comme les balises du commerce
+ *   - Le numéro de séquence 802.11 compte les beacons de chaque drone,
+ *     ce qui permet à un récepteur de savoir combien il en a manqué
  *   - Chaque drone simulé a sa propre trajectoire circulaire
  *   - La LED RGB du Stamp S3 flashe dans la couleur du drone émis
  *   - Les drones émettent en alternance (un par seconde)
@@ -20,12 +24,7 @@
 #include <WiFi.h>
 #include "droneID_FR.h"
 
-// Fonctions internes ESP32 pour envoyer des trames Wi-Fi brutes
-extern "C" {
 #include "esp_wifi.h"
-    esp_err_t esp_wifi_80211_tx(wifi_interface_t ifx, const void *buffer, int len, bool en_sys_seq);
-    esp_err_t esp_wifi_internal_set_fix_rate(wifi_interface_t ifx, bool en, wifi_phy_rate_t rate);
-}
 
 // ─────────────────────────────────────────────────────────────────────
 //  Configuration générale
@@ -33,7 +32,12 @@ extern "C" {
 
 #define WIFI_CHANNEL      6      // Canal imposé par la réglementation FR
 #define BEACON_INTERVAL  1000    // Intervalle entre émissions (ms), max 3s
+#define TX_POWER_DBM      2      // Puissance d'émission (2 à 20 dBm) ; faible pour un essai
+#ifdef RGB_BUILTIN
+#define RGB_LED_PIN      RGB_BUILTIN  // LED RGB de la carte
+#else
 #define RGB_LED_PIN      21      // LED RGB WS2812 du Stamp S3
+#endif
 #define LED_FLASH_MS     80      // Durée du flash LED par drone (ms)
 
 // ─────────────────────────────────────────────────────────────────────
@@ -62,11 +66,14 @@ struct Drone {
 
     // État interne
     double angle;               // Position actuelle sur le cercle (°)
+    uint16_t sequence;          // Compteur de beacons, 12 bits
 };
 
 // ─────────────────────────────────────────────────────────────────────
 //  Drones à simuler
 //  ID_FR : 30 chars exactement (trigramme constructeur + numéro série)
+//  Le trigramme TST et le mot ESSAI disent clairement que ce sont des essais.
+//  MAC : adresses administrées localement (premier octet 0x02).
 //  Zone : carrefour de l'Anémomètre, parc de l'île Saint-Germain,
 //         Issy-les-Moulineaux (48.8002, 2.2487)
 // ─────────────────────────────────────────────────────────────────────
@@ -74,9 +81,9 @@ struct Drone {
 static Drone drones[] = {
     {
         //                 123456789012345678901234567890
-        .id            = "DJI4FDE8A1B3C5MAV3P20240001AFR",
+        .id            = "TST000ESSAI0000000000000000001",
         .ssid          = "DRONE_TEST_01",
-        .mac           = {0xAA, 0xBB, 0xCC, 0x01, 0x01, 0x01},
+        .mac           = {0x02, 0x52, 0x49, 0x44, 0x00, 0x01},
         .color         = {0, 0, 255},       // Bleu
         .home_lat      = 48.799800,
         .home_lon      = 2.248000,
@@ -91,9 +98,9 @@ static Drone drones[] = {
     },
     {
         //                 123456789012345678901234567890
-        .id            = "PAR8GH92B5E7D1ANF2U20240002BFR",
+        .id            = "TST000ESSAI0000000000000000002",
         .ssid          = "DRONE_TEST_02",
-        .mac           = {0xAA, 0xBB, 0xCC, 0x02, 0x02, 0x02},
+        .mac           = {0x02, 0x52, 0x49, 0x44, 0x00, 0x02},
         .color         = {255, 0, 0},       // Rouge
         .home_lat      = 48.800500,
         .home_lon      = 2.249200,
@@ -123,10 +130,10 @@ static const uint8_t BEACON_HEADER[] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,             // Destination: broadcast
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,             // Source: rempli par drone
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,             // BSSID: rempli par drone
-    0x00, 0x00,                                     // Sequence (géré par ESP)
+    0x00, 0x00,                                     // Sequence: rempli par drone
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Timestamp
     0xE8, 0x03,                                     // Beacon interval: 1000 TU
-    0x21, 0x04,                                     // Capability info
+    0x01, 0x00,                                     // Capability info: ESS
 };
 
 static droneIDFR idfr;
@@ -175,6 +182,9 @@ void send_beacon(Drone &d) {
     memcpy(beacon, BEACON_HEADER, sizeof(BEACON_HEADER));
     memcpy(&beacon[10], d.mac, 6);
     memcpy(&beacon[16], d.mac, 6);
+    beacon[22] = (uint8_t)(d.sequence << 4);
+    beacon[23] = (uint8_t)(d.sequence >> 4);
+    d.sequence = (d.sequence + 1) & 0x0FFF;
 
     uint16_t pos = sizeof(BEACON_HEADER);
     uint8_t ssid_len = strlen(d.ssid);
@@ -183,9 +193,9 @@ void send_beacon(Drone &d) {
     memcpy(&beacon[pos], d.ssid, ssid_len);
     pos += ssid_len;
 
+    beacon[pos++] = 0x01;       // Supported rates
     beacon[pos++] = 0x01;
-    beacon[pos++] = 0x01;
-    beacon[pos++] = 0x0C;
+    beacon[pos++] = 0x82;       // 1 Mbit/s, débit de base
 
     beacon[pos++] = 0x03;
     beacon[pos++] = 0x01;
@@ -200,7 +210,10 @@ void send_beacon(Drone &d) {
     idfr.set_heading(get_heading(d));
 
     uint16_t end = idfr.generate_beacon_frame(beacon, pos);
-    esp_wifi_80211_tx(WIFI_IF_AP, beacon, end, true);
+    esp_err_t err = esp_wifi_80211_tx(WIFI_IF_STA, beacon, end, false);
+    if (err != ESP_OK) {
+        Serial.printf("[WARN] tx: %s\n", esp_err_to_name(err));
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -212,8 +225,8 @@ void setup() {
     delay(2000);
 
     Serial.println("\n=== DRONE-FR-SPOOFER ===");
-    Serial.printf("Drones: %d | Canal: %d | Intervalle: %dms\n\n",
-                  NUM_DRONES, WIFI_CHANNEL, BEACON_INTERVAL);
+    Serial.printf("Drones: %d | Canal: %d | Intervalle: %dms | 1 Mbit/s DSSS | %d dBm\n\n",
+                  NUM_DRONES, WIFI_CHANNEL, BEACON_INTERVAL, TX_POWER_DBM);
 
     rgbLedWrite(RGB_LED_PIN, 0, 0, 0);
     for (size_t i = 0; i < NUM_DRONES; i++) {
@@ -222,20 +235,22 @@ void setup() {
     }
     rgbLedWrite(RGB_LED_PIN, 0, 0, 0);
 
-    WiFi.softAP(drones[0].ssid, nullptr, WIFI_CHANNEL);
-    delay(500);
+    // Pas de point d'accès : il émettrait ses propres beacons en plus des nôtres.
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
 
-    wifi_config_t cfg;
-    esp_wifi_get_config(WIFI_IF_AP, &cfg);
-    cfg.ap.beacon_interval = 1000;
-    esp_wifi_set_config(WIFI_IF_AP, &cfg);
-
-    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
-
-    esp_err_t err = esp_wifi_internal_set_fix_rate(WIFI_IF_AP, true, WIFI_PHY_RATE_6M);
+    // Le débit des trames brutes ne se règle qu'interface arrêtée.
+    esp_wifi_stop();
+    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B);
+    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA, WIFI_PHY_RATE_1M_L);
     if (err != ESP_OK) {
-        Serial.printf("[WARN] fix_rate: %s (debit auto)\n", esp_err_to_name(err));
+        Serial.printf("[WARN] tx_rate: %s\n", esp_err_to_name(err));
     }
+    esp_wifi_start();
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_promiscuous(true);     // nécessaire pour choisir le canal sans association
+    esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_max_tx_power(TX_POWER_DBM * 4);
 
     Serial.println("Emission en cours...\n");
 }
@@ -264,9 +279,10 @@ void loop() {
     tx_count++;
     double lat, lon;
     get_position(drones[current_drone], lat, lon);
-    Serial.printf("[#%lu] %s  %.6f, %.6f  alt=%dm hdg=%03d\n",
+    Serial.printf("[#%lu] %s seq=%u  %.6f, %.6f  alt=%dm hdg=%03d\n",
                   tx_count,
-                  drones[current_drone].ssid, lat, lon,
+                  drones[current_drone].ssid,
+                  (drones[current_drone].sequence - 1) & 0x0FFF, lat, lon,
                   (int)drones[current_drone].altitude,
                   get_heading(drones[current_drone]));
 

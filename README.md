@@ -4,6 +4,10 @@ Simulateur de **signalement électronique français** (arrêté du 27 décembre 
 
 Génère des trames beacon Wi-Fi conformes à la norme française (OUI `0x6A5C35`, canal 6, format TLV) avec des positions simulées. Aucun GPS nécessaire.
 
+Les beacons partent en 802.11b DSSS à 1 Mbit/s, préambule long, à faible puissance (2 dBm par défaut). Le numéro de séquence 802.11 compte les beacons de chaque drone : un récepteur sait ainsi combien il en a manqué. Les identifiants par défaut (`TST000ESSAI...`) et les adresses MAC locales (`02:52:49:44:...`) disent clairement qu'il s'agit d'essais.
+
+Sert d'émetteur d'essai à [gr-remoteid](https://github.com/Alixpat/gr-remoteid), qui reçoit ces beacons avec une radio logicielle.
+
 ## Build & Flash
 
 ```bash
@@ -32,6 +36,7 @@ Modifier le tableau `drones[]` dans `src/main.cpp` :
 
 ## Vérification
 
+- **gr-remoteid** : `hackrf_transfer -r essai.cs8 -f 2437000000 -s 20000000 -l 24 -g 20 -n 160000000`, puis `remoteid_rx.py --file essai.cs8 --summary`
 - **ReceptionInfoDrone** (script Python) : https://github.com/GendarmerieNationale/ReceptionInfoDrone
 - **Wireshark** avec un adaptateur en mode monitor, filtre : `wlan.tag.oui == 6a:5c:35`
 

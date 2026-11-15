@@ -9,8 +9,9 @@
  *   - Toutes les secondes, il envoie une trame beacon 802.11 brute
  *     contenant un payload Vendor Specific (OUI 0x6A5C35) au format TLV
  *   - Les beacons partent en 802.11b DSSS à 1 Mbit/s, préambule long,
- *     comme beaucoup de balises du commerce ; avec BEACON_OFDM, en
- *     802.11g OFDM à 6 Mbit/s, comme certains drones
+ *     comme beaucoup de balises du commerce ; au choix en 802.11g OFDM
+ *     à 6 Mbit/s, comme certains drones, ou un drone sur deux dans
+ *     chaque débit
  *   - Le numéro de séquence 802.11 compte les beacons de chaque drone,
  *     ce qui permet à un récepteur de savoir combien il en a manqué
  *   - Chaque drone simulé a sa propre trajectoire circulaire
@@ -35,17 +36,15 @@
 #define BEACON_INTERVAL  1000    // Intervalle entre émissions (ms), max 3s
 #define TX_POWER_DBM      2      // Puissance d'émission (2 à 20 dBm) ; faible pour un essai
 
-// Débit des beacons : 802.11b DSSS à 1 Mbit/s, ou 802.11g OFDM à 6 Mbit/s si
-// BEACON_OFDM est défini (environnement m5stack-stamps3-ofdm).
-#ifdef BEACON_OFDM
-#define BEACON_PROTOCOL   (WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G)
-#define BEACON_RATE       WIFI_PHY_RATE_6M
-#define BEACON_BASIC_RATE 0x8C   // 6 Mbit/s, débit de base
+// Débit des beacons, choisi par l'environnement PlatformIO :
+//   - par défaut : 802.11b DSSS à 1 Mbit/s
+//   - BEACON_OFDM  (m5stack-stamps3-ofdm)  : 802.11g OFDM à 6 Mbit/s
+//   - BEACON_MIXED (m5stack-stamps3-mixed) : un drone sur deux dans chaque débit
+#if defined(BEACON_MIXED)
+#define BEACON_RATE_NAME  "1 Mbit/s DSSS et 6 Mbit/s OFDM en alternance"
+#elif defined(BEACON_OFDM)
 #define BEACON_RATE_NAME  "6 Mbit/s OFDM"
 #else
-#define BEACON_PROTOCOL   WIFI_PROTOCOL_11B
-#define BEACON_RATE       WIFI_PHY_RATE_1M_L
-#define BEACON_BASIC_RATE 0x82   // 1 Mbit/s, débit de base
 #define BEACON_RATE_NAME  "1 Mbit/s DSSS"
 #endif
 #ifdef RGB_BUILTIN
@@ -190,7 +189,38 @@ uint16_t get_heading(const Drone &d) {
 //  Construction et envoi de la beacon
 // ─────────────────────────────────────────────────────────────────────
 
-void send_beacon(Drone &d) {
+// Vrai si le drone de ce rang émet en OFDM.
+static bool uses_ofdm(size_t drone) {
+#if defined(BEACON_MIXED)
+    return drone % 2 == 1;
+#elif defined(BEACON_OFDM)
+    (void)drone;
+    return true;
+#else
+    (void)drone;
+    return false;
+#endif
+}
+
+// Met la radio en route au débit voulu. Le débit des trames brutes ne se règle
+// qu'interface arrêtée : en alternance, la radio redémarre avant chaque beacon.
+static void radio_start(bool ofdm) {
+    esp_wifi_stop();
+    esp_wifi_set_protocol(WIFI_IF_STA, ofdm ? (WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G)
+                                            : WIFI_PROTOCOL_11B);
+    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA,
+                                                  ofdm ? WIFI_PHY_RATE_6M : WIFI_PHY_RATE_1M_L);
+    if (err != ESP_OK) {
+        Serial.printf("[WARN] tx_rate: %s\n", esp_err_to_name(err));
+    }
+    esp_wifi_start();
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_promiscuous(true);     // nécessaire pour choisir le canal sans association
+    esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    esp_wifi_set_max_tx_power(TX_POWER_DBM * 4);
+}
+
+void send_beacon(Drone &d, bool ofdm) {
     double lat, lon;
     get_position(d, lat, lon);
 
@@ -210,7 +240,7 @@ void send_beacon(Drone &d) {
 
     beacon[pos++] = 0x01;       // Supported rates
     beacon[pos++] = 0x01;
-    beacon[pos++] = BEACON_BASIC_RATE;
+    beacon[pos++] = ofdm ? 0x8C : 0x82;   // débit de base : 6 ou 1 Mbit/s
 
     beacon[pos++] = 0x03;
     beacon[pos++] = 0x01;
@@ -254,18 +284,7 @@ void setup() {
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
 
-    // Le débit des trames brutes ne se règle qu'interface arrêtée.
-    esp_wifi_stop();
-    esp_wifi_set_protocol(WIFI_IF_STA, BEACON_PROTOCOL);
-    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA, BEACON_RATE);
-    if (err != ESP_OK) {
-        Serial.printf("[WARN] tx_rate: %s\n", esp_err_to_name(err));
-    }
-    esp_wifi_start();
-    esp_wifi_set_ps(WIFI_PS_NONE);
-    esp_wifi_set_promiscuous(true);     // nécessaire pour choisir le canal sans association
-    esp_wifi_set_channel(WIFI_CHANNEL, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_set_max_tx_power(TX_POWER_DBM * 4);
+    radio_start(uses_ofdm(0));
 
     Serial.println("Emission en cours...\n");
 }
@@ -288,14 +307,18 @@ void loop() {
     double dt = BEACON_INTERVAL / 1000.0 * NUM_DRONES;
     update_position(drones[current_drone], dt);
 
-    send_beacon(drones[current_drone]);
+    const bool ofdm = uses_ofdm(current_drone);
+#if defined(BEACON_MIXED)
+    radio_start(ofdm);
+#endif
+    send_beacon(drones[current_drone], ofdm);
     led_flash(drones[current_drone].color);
 
     tx_count++;
     double lat, lon;
     get_position(drones[current_drone], lat, lon);
-    Serial.printf("[#%lu] %s seq=%u  %.6f, %.6f  alt=%dm hdg=%03d\n",
-                  tx_count,
+    Serial.printf("[#%lu] %s %s seq=%u  %.6f, %.6f  alt=%dm hdg=%03d\n",
+                  tx_count, ofdm ? "OFDM" : "DSSS",
                   drones[current_drone].ssid,
                   (drones[current_drone].sequence - 1) & 0x0FFF, lat, lon,
                   (int)drones[current_drone].altitude,

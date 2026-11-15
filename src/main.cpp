@@ -9,7 +9,8 @@
  *   - Toutes les secondes, il envoie une trame beacon 802.11 brute
  *     contenant un payload Vendor Specific (OUI 0x6A5C35) au format TLV
  *   - Les beacons partent en 802.11b DSSS à 1 Mbit/s, préambule long,
- *     comme les balises du commerce
+ *     comme beaucoup de balises du commerce ; avec BEACON_OFDM, en
+ *     802.11g OFDM à 6 Mbit/s, comme certains drones
  *   - Le numéro de séquence 802.11 compte les beacons de chaque drone,
  *     ce qui permet à un récepteur de savoir combien il en a manqué
  *   - Chaque drone simulé a sa propre trajectoire circulaire
@@ -33,6 +34,20 @@
 #define WIFI_CHANNEL      6      // Canal imposé par la réglementation FR
 #define BEACON_INTERVAL  1000    // Intervalle entre émissions (ms), max 3s
 #define TX_POWER_DBM      2      // Puissance d'émission (2 à 20 dBm) ; faible pour un essai
+
+// Débit des beacons : 802.11b DSSS à 1 Mbit/s, ou 802.11g OFDM à 6 Mbit/s si
+// BEACON_OFDM est défini (environnement m5stack-stamps3-ofdm).
+#ifdef BEACON_OFDM
+#define BEACON_PROTOCOL   (WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G)
+#define BEACON_RATE       WIFI_PHY_RATE_6M
+#define BEACON_BASIC_RATE 0x8C   // 6 Mbit/s, débit de base
+#define BEACON_RATE_NAME  "6 Mbit/s OFDM"
+#else
+#define BEACON_PROTOCOL   WIFI_PROTOCOL_11B
+#define BEACON_RATE       WIFI_PHY_RATE_1M_L
+#define BEACON_BASIC_RATE 0x82   // 1 Mbit/s, débit de base
+#define BEACON_RATE_NAME  "1 Mbit/s DSSS"
+#endif
 #ifdef RGB_BUILTIN
 #define RGB_LED_PIN      RGB_BUILTIN  // LED RGB de la carte
 #else
@@ -195,7 +210,7 @@ void send_beacon(Drone &d) {
 
     beacon[pos++] = 0x01;       // Supported rates
     beacon[pos++] = 0x01;
-    beacon[pos++] = 0x82;       // 1 Mbit/s, débit de base
+    beacon[pos++] = BEACON_BASIC_RATE;
 
     beacon[pos++] = 0x03;
     beacon[pos++] = 0x01;
@@ -225,8 +240,8 @@ void setup() {
     delay(2000);
 
     Serial.println("\n=== DRONE-FR-SPOOFER ===");
-    Serial.printf("Drones: %d | Canal: %d | Intervalle: %dms | 1 Mbit/s DSSS | %d dBm\n\n",
-                  NUM_DRONES, WIFI_CHANNEL, BEACON_INTERVAL, TX_POWER_DBM);
+    Serial.printf("Drones: %d | Canal: %d | Intervalle: %dms | %s | %d dBm\n\n",
+                  NUM_DRONES, WIFI_CHANNEL, BEACON_INTERVAL, BEACON_RATE_NAME, TX_POWER_DBM);
 
     rgbLedWrite(RGB_LED_PIN, 0, 0, 0);
     for (size_t i = 0; i < NUM_DRONES; i++) {
@@ -241,8 +256,8 @@ void setup() {
 
     // Le débit des trames brutes ne se règle qu'interface arrêtée.
     esp_wifi_stop();
-    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B);
-    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA, WIFI_PHY_RATE_1M_L);
+    esp_wifi_set_protocol(WIFI_IF_STA, BEACON_PROTOCOL);
+    esp_err_t err = esp_wifi_config_80211_tx_rate(WIFI_IF_STA, BEACON_RATE);
     if (err != ESP_OK) {
         Serial.printf("[WARN] tx_rate: %s\n", esp_err_to_name(err));
     }

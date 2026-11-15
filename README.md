@@ -6,6 +6,8 @@ Génère des trames beacon Wi-Fi conformes à la norme française (OUI `0x6A5C35
 
 Les beacons partent en 802.11b DSSS à 1 Mbit/s, préambule long, à faible puissance (2 dBm par défaut). Le numéro de séquence 802.11 compte les beacons de chaque drone : un récepteur sait ainsi combien il en a manqué. Les identifiants par défaut (`TST000ESSAI...`) et les adresses MAC locales (`02:52:49:44:...`) disent clairement qu'il s'agit d'essais.
 
+Certains drones émettent leurs balises en 802.11g OFDM à 6 Mbit/s. L'environnement `m5stack-stamps3-ofdm` émet les mêmes beacons de cette façon. L'environnement `m5stack-stamps3-mixed` alterne : le premier drone en DSSS, le second en OFDM, pour essayer un récepteur dans les deux cas avec une seule capture. La radio redémarre alors avant chaque beacon, le débit ne se réglant qu'interface arrêtée.
+
 Sert d'émetteur d'essai à [gr-remoteid](https://github.com/Alixpat/gr-remoteid), qui reçoit ces beacons avec une radio logicielle.
 
 ## Build & Flash
@@ -15,7 +17,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install platformio
 
-pio run -t upload
+pio run -t upload                           # 802.11b DSSS, 1 Mbit/s
+pio run -e m5stack-stamps3-ofdm -t upload   # 802.11g OFDM, 6 Mbit/s
+pio run -e m5stack-stamps3-mixed -t upload  # un drone sur deux dans chaque débit
 pio device monitor
 ```
 

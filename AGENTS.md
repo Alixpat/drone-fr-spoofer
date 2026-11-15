@@ -9,8 +9,10 @@ récepteur, par exemple [gr-remoteid](https://github.com/Alixpat/gr-remoteid).
 1. C'est un outil d'essai. Les identifiants par défaut restent marqués comme tels
    (`TST000ESSAI...`, adresses MAC locales `02:52:49:44:...`) : ne pas imiter un vrai drone.
 2. Puissance faible par défaut (`TX_POWER_DBM`, 2 dBm).
-3. Émission en 802.11b DSSS à 1 Mbit/s, préambule long, canal 6. Ne pas changer le débit
-   sans vérifier la réception.
+3. Émission en 802.11b DSSS à 1 Mbit/s, préambule long, canal 6. L'environnement
+   `m5stack-stamps3-ofdm` émet les mêmes beacons en 802.11g OFDM à 6 Mbit/s, et
+   `m5stack-stamps3-mixed` un drone sur deux dans chaque débit. Ne pas changer un débit sans
+   vérifier la réception.
 4. Le numéro de séquence 802.11 compte les beacons de chaque drone. Le garder : il sert à
    mesurer les pertes côté récepteur.
 5. `src/droneID_FR.h` vient de Pierre Kancir (GPL v3). Ne pas le modifier sans raison.
@@ -23,6 +25,8 @@ PlatformIO s'installe dans un environnement virtuel, voir le README.
 ```bash
 pio run              # compile
 pio run -t upload    # écrit sur la carte
+pio run -e m5stack-stamps3-ofdm -t upload   # variante OFDM à 6 Mbit/s
+pio run -e m5stack-stamps3-mixed -t upload  # un drone sur deux dans chaque débit
 pio device monitor   # lit le port série
 ```
 
